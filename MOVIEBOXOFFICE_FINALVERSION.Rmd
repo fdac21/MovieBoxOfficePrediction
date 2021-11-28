@@ -1,0 +1,412 @@
+---
+title: "MovieMining"
+author: "Rita Zou, Fei Xu, Yang Li, Xinyu Cao, Rus Refati"
+date: "11/28/2021"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+Packages (not sure what is needed)
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(caret)
+library(lubridate)
+```
+
+Read in Data, remove text heavy columns
+
+### Preprocessing
+
+```{r}
+#setwd("~/Desktop/UTK/BZAN 542 - Data Mining/Group Project")
+MOVIES <- read.csv("imdb_top_1000.csv")
+
+ ########### Filter Data ########### 
+#Remove poster link and plot overview
+MOVIES <- MOVIES %>% select(-c(Poster_Link,Overview))
+#Store all blanks as NA
+MOVIES[MOVIES==""] <- NA
+#Remove rows with NAs for Gross:
+MOVIES <- MOVIES[-which(is.na(MOVIES$Gross)),]
+
+ ########### Fix Data Types ########### 
+#Released_year
+  MOVIES[804,"Certificate"] <- MOVIES[804,"Released_Year"]; MOVIES[804,"Released_Year"] <- "1995" #Year courtesy of Google
+  MOVIES$Released_Year <- as.numeric(MOVIES$Released_Year)
+#Runtime
+  MOVIES$Runtime <- as.integer(sapply(strsplit(MOVIES$Runtime," "), '[',1))
+#Certificate
+  MOVIES$Certificate <- as.factor(MOVIES$Certificate)
+#Certificate
+  MOVIES$Genre <- as.factor(MOVIES$Genre)
+#Gross
+  MOVIES$Gross <- as.numeric(gsub(",","",MOVIES$Gross)) 
+#Stars
+  for(i in grep("Star", names(MOVIES))){
+    MOVIES[,i] <- as.factor(MOVIES[,i])
+  }
+ ########### Create Indicator Variables ########### 
+  
+    ### Certificate ###
+    MOVIES <- MOVIES[-which(is.na(MOVIES$Certificate)),]
+    formula <- as.formula( paste("~",names(MOVIES)[3],"-1",sep="") ) #set up formula for model.matrix 
+    INDICATORS <- data.frame(model.matrix(formula,data=MOVIES))
+    MOVIES <- cbind(MOVIES,INDICATORS)
+    MOVIES <- MOVIES[,-3]
+    
+   ### Genre ###
+# First step: Get all of the genres that occur in the data
+AllGenres <- unique(levels(as.factor(MOVIES$Genre)))
+ListOfGenres <- c()
+for(i in AllGenres){
+  templist <- unlist( strsplit(i, " " ) )
+  for(j in 1:length(templist)){
+   tempgenre <- unlist(strsplit(templist[j], ",") )
+    if( tempgenre %in% ListOfGenres ) { next }
+   else {ListOfGenres[length(ListOfGenres)+1] <- tempgenre}
+  }
+}
+length(ListOfGenres)
+#21 different genres found
+
+# Second step: Create data frame of indicator variables using found genres
+GENREINDICATOR <- as.data.frame(matrix(rep(0, nrow(MOVIES)*length(ListOfGenres)), ncol=length(ListOfGenres)))
+names(GENREINDICATOR) <- ListOfGenres #Initialize empty dataframe of all 0's
+#Loop through each movie and change the column genre for each one that movie belongs
+for(i in 1:nrow(MOVIES)){
+  targetmovie <- unlist(strsplit(as.character(MOVIES[i,"Genre"]), " "))
+  for(j in 1:length(targetmovie)){
+    targetgenre <- unlist(strsplit(targetmovie[j], ","))
+    GENREINDICATOR[i,targetgenre] <- 1
+  }
+}
+MOVIES <- cbind(MOVIES, GENREINDICATOR)
+ ############################################    
+
+
+
+#From Dr. Petrie:
+#Looking for zero variance or near zero variance predictors
+infodensity <- nearZeroVar(MOVIES, saveMetrics= TRUE)
+infodensity[infodensity$nzv,][1:5,]  #dataframe of measures 
+#freqRatio = # times most common element appears / # times second most common element appears
+#percentUnique = 0-100 percent of distinct values in data; 100 = all values different
+zero.variance <- which( nearZeroVar(MOVIES, saveMetrics= TRUE)$zeroVar == TRUE )
+near.zero.variance <- which( nearZeroVar(MOVIES, saveMetrics= TRUE)$nzv == TRUE )
+#0 variables with zero variance; 16 variables with near-zero variance
+
+#Explore highly correlated or redundant predictors
+#Put a minus sign before the column number that contains the y variable
+highlycorrelated <- findCorrelation( cor(MOVIES[,which(sapply(MOVIES, class) == "numeric")]) , cutoff = .90)
+highlycorrelated # No columns are highly correlated with each other
+
+```
+
+Check for duplicates before renaming rows as Movie Title
+```
+#### EDIT: After filtering the data with the code above, there are no longer any duplicates ####
+
+# #there is one duplicate in dataset
+# length(unique(MOVIES$Series_Title)) 
+# nrow(MOVIES)
+# 
+# MOVIES[which(duplicated(MOVIES$Series_Title)==TRUE),]
+# which(MOVIES$Series_Title == "Drishyam")
+# MOVIES[c(88,137),] 
+# #The two movies were created two years apart in two different languages  -Marc
+# 
+# MOVIES[88,1] <- "Drishyam1"
+# MOVIES[137,1] <- "Drishyam2"
+# 
+# rownames(MOVIES) <- MOVIES$Series_Title
+# MOVIES <- MOVIES %>% select(-(Series_Title))
+
+```
+
+Be it as Gross is so highly skewed, I believe we should take the log
+
+```{r}
+hist(MOVIES$Gross)
+MOVIES$Gross <- log(MOVIES$Gross)
+hist(MOVIES$Gross)
+```
+
+Final Check on NA values
+
+```{r}
+#check for any NA columns
+apply(MOVIES,2,function(x) any(is.na(x)))
+
+
+#find that metascore does
+MOVIES <- MOVIES[-which(is.na(MOVIES$Meta_score) == TRUE),]
+
+summary(MOVIES)
+nrow(MOVIES)
+```
+
+## Actor / Director Top 50 Rankings
+
+<https://www.ranker.com/crowdranked-list/the-most-oscar-worthy-directors-of-all-time>
+
+<https://www.ranker.com/crowdranked-list/the-greatest-film-actors-and-actresses-of-all-time?ref=collections_page>
+
+Created csv for the top 50 of each, maybe we can decide how to code these into predictors later, either binary or by grouping 0-10,11-20 etc.
+
+Rankings are voted by general population, but are recent and reflect public's view -- which are both positives.
+
+```{r}
+RANKINGS <- read.csv("best_actors_directors.csv")
+head(RANKINGS)
+
+#check if top50director present
+top50director <- c()
+for (i in 1:nrow(MOVIES)) {
+  if(MOVIES$Director[i] %in% RANKINGS$director){top50director[i] <- 1}
+  else{top50director[i] <- 0}
+}
+
+MOVIES$top50director <- top50director
+
+#check across all 4 stars if top50 actor present
+counter <- c(rep(0,nrow(MOVIES)))
+top50actor <- c()
+for (i in 1:nrow(MOVIES)) {
+  if(MOVIES$Star1[i] %in% RANKINGS$actor){counter[i] <- counter[i]+1}
+  else{counter[i] <- counter[i]+0}
+  if(MOVIES$Star2[i] %in% RANKINGS$actor){counter[i] <- counter[i]+1}
+  else{counter[i] <- counter[i]+0}
+  if(MOVIES$Star3[i] %in% RANKINGS$actor){counter[i] <- counter[i]+1}
+  else{counter[i] <- counter[i]+0}
+  if(MOVIES$Star4[i] %in% RANKINGS$actor){counter[i] <- counter[i]+1}
+  else{counter[i] <- counter[i]+0}
+  if(counter[i] >= 1){top50actor[i] <- 1}
+  else{top50actor[i] <- 0}
+}
+MOVIES$top50actor <- top50actor
+
+
+#fix row indices
+rownames(MOVIES) <- c(seq(from = 1,to = 714,by=1))
+
+```
+
+## Ultimate Task: Predicting Gross Box Office Sales
+
+Clustering IMDB v Gross
+
+```{r}
+
+set.seed(542)
+grpRatings <- kmeans(MOVIES[,c("IMDB_Rating","Gross")],centers = 3, nstart = 50)
+grpRatings
+
+min(MOVIES$IMDB_Rating)
+
+plot(MOVIES$IMDB_Rating, MOVIES$Gross, type="n", xlim=c(7,10), xlab="IMDB Rating", ylab="Gross log(Sales)")
+text(x=MOVIES$IMDB_Rating, y=MOVIES$Gross, labels=rownames(MOVIES), col=grpRatings$cluster)
+
+MOVIES[1,]
+
+```
+
+Clustering Meta_Score v Gross
+
+```{r}
+
+set.seed(542)
+grpRatingsMeta <- kmeans(MOVIES[,c("Meta_score","Gross")],centers = 3, nstart = 50)
+grpRatingsMeta
+
+min(MOVIES$Meta_score)
+
+plot(MOVIES$Meta_score, MOVIES$Gross, type="n", xlab="Meta_score", ylab="Gross log(Sales)")
+text(x=MOVIES$Meta_score, y=MOVIES$Gross, labels=rownames(MOVIES), col=grpRatingsMeta$cluster)
+
+MOVIES[40,]
+```
+
+Clustering Runtime v Gross
+
+```{r}
+which(is.na(MOVIES$Runtime) == TRUE)
+which(is.na(MOVIES$Gross) == TRUE)
+
+set.seed(542)
+grpRunGross <- kmeans(MOVIES[,c("Runtime","Gross")],centers = 3, nstart = 50)
+grpRunGross
+
+plot(MOVIES$Runtime, MOVIES$Gross, type="n", xlab="Runtime", ylab="Gross log(Sales")
+text(x=MOVIES$Runtime, y=MOVIES$Gross, labels=rownames(MOVIES), col=grpRunGross$cluster)
+```
+
+Clustering Certificate v Gross
+
+```{r}
+
+which(is.na(MOVIES$Certificate) == TRUE)
+which(is.na(MOVIES$Gross) == TRUE)
+
+CERTIFICATECLUSTER <- MOVIES[-c(which(is.na(MOVIES$Gross) | is.na(MOVIES$Certificate))),]
+
+CERTIFICATECLUSTER$Gross <- as.numeric(gsub(",","",CERTIFICATECLUSTER$Gross)) #Convert gross to numeric
+
+###Because "Certificate" is a categorical variable, we cannot use it in a clustering algorithm directly. We also cannot replace them with values 1,2,3,4, etc.
+#Below is the code that will convert each unique Certificate into its own binary indicator variable (courtesy of Dr. Petrie)
+CERTIFICATECLUSTER$Certificate <- as.factor(CERTIFICATECLUSTER$Certificate) #Must be a factor
+formula <- as.formula( paste("~",names(CERTIFICATECLUSTER)[i],"-1",sep="") ) #set up formula for model.matrix 
+
+INDICATORS <- data.frame(model.matrix(formula,data=CERTIFICATECLUSTER))
+CERTIFICATECLUSTER <- cbind(CERTIFICATECLUSTER,INDICATORS) #add columns for the indicator variables
+
+levels(CERTIFICATECLUSTER$Certificate) #There are a lot of different Certificates, and some of them probably mean the same thing. We may want to consider combining some 
+
+set.seed(542)
+grpRunGross <- kmeans(MOVIES[,c(13:26)],centers = 3, nstart = 50)
+grpRunGross
+
+#Not sure how to plot this...
+
+```
+
+## Discretize Runtime + Gross
+
+```{r}
+
+library(Hmisc)
+
+hist(MOVIES$Gross)
+
+#less than 5 million is a flop
+log(5e6)
+#5 million to 25million underperforming
+log(25e6)
+#25million to 100 million mod success
+log(100e6)
+#100 million to 300 million successful
+log(300e6)
+#more than 300million is blockbuster
+
+
+
+MOVIES <- MOVIES %>% mutate(Box_Office_Groups = case_when(
+            Gross <= 15.42495 ~ 1,
+            Gross > 15.42495 & Gross <= 17.03439 ~ 2,
+            Gross > 17.03439 & Gross <= 18.42068 ~ 3,
+            Gross > 18.42068 & Gross <= 19.51929 ~ 4,
+            Gross > 19.51929 ~ 5,
+))
+
+table(MOVIES$Box_Office_Groups)
+
+MOVIES <- MOVIES %>% mutate(Box_Office_Performance = case_when(
+            Box_Office_Groups == 1 ~ "flop" ,
+            Box_Office_Groups == 2 ~ "underperforming" ,
+            Box_Office_Groups == 3 ~ "moderate success" ,
+            Box_Office_Groups == 4 ~ "successful" ,
+             Box_Office_Groups == 5 ~ "blockbuster" ,
+    )
+)
+
+MOVIES <- MOVIES %>% mutate(Runtime_Groups = case_when(
+            Runtime <= 90 ~ 1,
+            Runtime >90 & Runtime <= 120 ~ 2,
+            Runtime >120 & Runtime <= 150 ~ 3,
+            Runtime >150 ~ 4,
+        )
+)
+MOVIES <- MOVIES %>% mutate(Runtime_Lengths = case_when(
+            Runtime_Groups == 1 ~ "sub1.5" ,
+            Runtime_Groups == 2 ~ "1.5to2",
+            Runtime_Groups == 3 ~ "2to2.5",
+            Runtime_Groups == 4 ~ "2.5andabove",
+           
+    )
+)
+
+#Are these groups significantly different?
+#Connecting letters report:
+library(multcompView)
+AOV <- aov(Gross ~ Box_Office_Performance, data=MOVIES) #Set up left/right side of ~ and data=
+TUKEY <- TukeyHSD(AOV)
+multcompLetters4(AOV,TUKEY)
+#Yes! Each group is significantly different from each other
+
+```
+
+## Test / Train split
+
+```{r}
+#80/20 split for industry standard
+
+#use dplyr way
+set.seed(542)
+index <- sample(1:nrow(MOVIES),size=trunc(.8*nrow(MOVIES)))
+
+MOVIESTRAIN <- MOVIES %>% filter(row_number() %in% index)
+MOVIESTEST <- MOVIES %>% filter(!(row_number() %in% index))
+
+length(unique(rownames(MOVIESTRAIN)))
+nrow(MOVIESTRAIN)
+#wanted to ensure dplyr was sampling w/o replacement...it was
+
+```
+
+
+## SVM Model
+
+```{r}
+
+# #install.packages('e1071')
+# num = sapply(MOVIESTRAIN, is.numeric)  # num contains numeric column indices
+# fact = sapply(MOVIESTRAIN, is.factor)
+# MOVIESTRAIN_numeric = MOVIESTRAIN[, num]      # the numeric data
+# MOVIESTRAIN_factor = MOVIESTRAIN[, fact] 
+# drops <- c("CertificateUnrated") #shows CertificateUnrated is constant
+# MOVIESTRAIN_numeric_new<-MOVIESTRAIN_numeric[, !(names(MOVIESTRAIN_numeric) %in% drops)]
+##
+# num1 = sapply(MOVIESTEST, is.numeric)  # num contains numeric column indices
+# fact1 = sapply(MOVIESTEST, is.factor)
+# MOVIESTEST_numeric = MOVIESTEST[, num]      # the numeric data
+# MOVIESTEST_factor = MOVIESTEST[, fact]
+# drops <- c("CertificateUnrated")
+# MOVIESTEST_numeric_new <-
+#   MOVIESTEST_numeric[,!(names(MOVIESTEST_numeric) %in% drops)]
+# library(e1071)
+
+
+svmFit<-train(Box_Office_Performance~.,data=MOVIESTRAIN[,c(2,3,14:49,51)],method="svmLinear",trControl=trainControl(method="cv",number=10))
+svmFit
+pred<-predict(svmFit,newdata=MOVIESTEST)
+table(MOVIESTEST$Box_Office_Performance,pred)# confusion matrix
+sum(MOVIESTEST$Box_Office_Performance==pred)/nrow(MOVIESTEST)
+
+svmFit2<-train(Box_Office_Performance~.,data=MOVIESTRAIN[,c(2,3,14:49,51)],method="svmRadial",trControl=trainControl(method="cv",number=10))
+svmFit2
+pred2<-predict(svmFit2,newdata=MOVIESTEST)
+table(MOVIESTEST$Box_Office_Performance,pred2)# confusion matrix
+sum(MOVIESTEST$Box_Office_Performance==pred2)/nrow(MOVIESTEST)
+```
+
+## Boosted Tree
+
+```{r}
+xgbFit<-train(Box_Office_Performance~.,data=MOVIESTRAIN[,c(2,3,14:49,51)],method="xgbTree",
+              trControl=trainControl(method="cv",number=10),
+              )
+xgbFit
+```
+
+##Artificial Neural Network
+
+```{r}
+nnetFit<-train(Box_Office_Performance~.,data=MOVIESTRAIN[,c(2,3,14:49,51)],method="nnet",trControl=trainControl(method="cv",number=10))
+nnetFit
+```
